@@ -40,20 +40,24 @@ def process_tracking(predictor, video_path, start_frame, initial_bbox, writer):
     predictor.add_new_points_or_box(state, box=initial_bbox, frame_idx=start_frame, obj_id=0)
 
     # Propagate the object mask throughout the video
+    # We don't use start_frame_idx because it can cause KeyError in SAMURAI mode
+    # when looking for previous frames that don't exist in the tracking history
     for frame_idx, object_ids, masks in predictor.propagate_in_video(state):
-        for obj_id, mask in zip(object_ids, masks):
-            # Convert mask to binary and compute bounding rectangle
-            mask_np = mask[0].cpu().numpy()
-            mask_bin = mask_np > 0.0
-            non_zero = np.argwhere(mask_bin)
-            if non_zero.size == 0:
-                bbox = [0, 0, 0, 0]
-            else:
-                y_min, x_min = non_zero.min(axis=0).tolist()
-                y_max, x_max = non_zero.max(axis=0).tolist()
-                bbox = [x_min, y_min, x_max - x_min, y_max - y_min]
-            # Write output row: video_path, frame, object_id, x, y, width, height
-            writer.writerow([video_path, frame_idx, obj_id, bbox[0], bbox[1], bbox[2], bbox[3]])
+        # Only process and output frames from the start_frame onwards
+        if frame_idx >= start_frame:
+            for obj_id, mask in zip(object_ids, masks):
+                # Convert mask to binary and compute bounding rectangle
+                mask_np = mask[0].cpu().numpy()
+                mask_bin = mask_np > 0.0
+                non_zero = np.argwhere(mask_bin)
+                if non_zero.size == 0:
+                    bbox = [0, 0, 0, 0]
+                else:
+                    y_min, x_min = non_zero.min(axis=0).tolist()
+                    y_max, x_max = non_zero.max(axis=0).tolist()
+                    bbox = [x_min, y_min, x_max - x_min, y_max - y_min]
+                # Write output row: video_path, frame, object_id, x, y, width, height
+                writer.writerow([video_path, frame_idx, obj_id, bbox[0], bbox[1], bbox[2], bbox[3]])
 
     # Clean up state for this video
     del state

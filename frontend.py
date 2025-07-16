@@ -278,9 +278,8 @@ class MainWindow(QMainWindow):
 
     def finish_annotation(self):
         self.save_annotation()
-        save_path, _ = QFileDialog.getSaveFileName(self, "Save Annotations CSV", "", "CSV (*.csv)")
-        if not save_path:
-            return
+        # Save to boxes.csv in the current directory for the backend to process
+        save_path = "boxes.csv"
         with open(save_path, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['video_path','frame','x','y','width','height'])
@@ -292,7 +291,15 @@ class MainWindow(QMainWindow):
         self.finish_btn.setEnabled(False)
     
     def finish_function(self):
-        subprocess.run(["python", "scripts/demo2.py"], check=True)
+        # Change to the parent directory to run the backend script
+        import os
+        original_cwd = os.getcwd()
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        os.chdir(script_dir)
+        try:
+            subprocess.run(["python", "scripts/demo2.py"], check=True)
+        finally:
+            os.chdir(original_cwd)
 
     def load_csv_to_table(self, path):
         with open(path, 'r', newline='') as f:
