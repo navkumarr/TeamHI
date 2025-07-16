@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import gc
 import sys
+import cv2
 
 # Append SAM2 library path
 sys.path.append("./sam2")
@@ -39,6 +40,28 @@ def process_tracking(predictor, video_path, start_frame, initial_bbox, writer):
     # Add initial box at the specified start_frame for object ID 0
     predictor.add_new_points_or_box(state, box=initial_bbox, frame_idx=start_frame, obj_id=0)
 
+    # Create output directory if it doesn't exist
+    output_dir = "outputs"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Prepare output video path
+    video_name = osp.basename(video_path)
+    name_without_ext = osp.splitext(video_name)[0]
+    output_video_path = osp.join(output_dir, f"{name_without_ext}_tracked.mp4")
+    
+    # Open input video to get properties
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # Setup video writer
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out_video = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+    
+    # Store tracking results for video generation
+    tracking_results = {}
+
     # Propagate the object mask throughout the video
     # We don't use start_frame_idx because it can cause KeyError in SAMURAI mode
     # when looking for previous frames that don't exist in the tracking history
@@ -56,8 +79,57 @@ def process_tracking(predictor, video_path, start_frame, initial_bbox, writer):
                     y_min, x_min = non_zero.min(axis=0).tolist()
                     y_max, x_max = non_zero.max(axis=0).tolist()
                     bbox = [x_min, y_min, x_max - x_min, y_max - y_min]
-                # Write output row: video_path, frame, object_id, x, y, width, height
-                writer.writerow([video_path, frame_idx, obj_id, bbox[0], bbox[1], bbox[2], bbox[3]])
+                
+                # Calculate centroid
+                centroid_x = bbox[0] + bbox[2] / 2  # x + width/2
+                centroid_y = bbox[1] + bbox[3] / 2  # y + height/2
+                
+                # Store tracking result for this frame
+                tracking_results[frame_idx] = {
+                    'bbox': bbox,
+                    'centroid': (centroid_x, centroid_y),
+                    'mask': mask_np
+                }
+                
+                # Write output row: video_path, frame, object_id, x, y, width, height, centroid_x, centroid_y
+                writer.writerow([video_path, frame_idx, obj_id, bbox[0], bbox[1], bbox[2], bbox[3], centroid_x, centroid_y])
+    
+    # Generate output video with tracking overlays
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+            
+        # Draw tracking results if available for this frame
+        if frame_idx in tracking_results:
+            result = tracking_results[frame_idx]
+            bbox = result['bbox']
+            centroid = result['centroid']
+            
+            # Draw bounding box
+            cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), 
+                         (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3])), 
+                         (0, 255, 0), 2)
+            
+            # Draw centroid
+            cv2.circle(frame, (int(centroid[0]), int(centroid[1])), 5, (0, 0, 255), -1)
+            
+            # Add frame number and centroid text
+            cv2.putText(frame, f"Frame: {frame_idx}", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(frame, f"Centroid: ({int(centroid[0])}, {int(centroid[1])})", 
+                       (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        
+        out_video.write(frame)
+        frame_idx += 1
+    
+    # Clean up
+    cap.release()
+    out_video.release()
+    
+    print(f"Saved tracked video: {output_video_path}")
 
     # Clean up state for this video
     del state
@@ -74,7 +146,7 @@ def main(args):
     output_csv = "tracking_results.csv"
     with open(output_csv, 'w', newline='') as out_f:
         writer = csv.writer(out_f)
-        writer.writerow(['video_path', 'frame', 'object_id', 'x', 'y', 'width', 'height'])
+        writer.writerow(['video_path', 'frame', 'object_id', 'x', 'y', 'width', 'height', 'centroid_x', 'centroid_y'])
 
         # Read input boxes.csv (hard-coded)
         with open('boxes.csv', newline='') as in_f:

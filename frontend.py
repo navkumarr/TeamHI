@@ -2,13 +2,48 @@ import sys
 import subprocess
 import csv
 import cv2
-from PySide6.QtCore import Qt, QRect, QRectF, QPoint, QSize, QTimer
+import os
+import threading
+import time
+from PySide6.QtCore import Qt, QRect, QRectF, QPoint, QSize, QTimer, QThread, Signal
 from PySide6.QtGui import QPixmap, QImage, QPen, QBrush, QColor, QKeySequence, QStandardItemModel, QStandardItem, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QLabel, QGraphicsScene, QGraphicsView, QGraphicsRectItem,
-    QRubberBand, QSplitter, QTableView, QHeaderView, QSlider
+    QRubberBand, QSplitter, QTableView, QHeaderView, QSlider, QMessageBox, QProgressDialog
 )
+
+class ProcessingWorker(QThread):
+    finished = Signal(int, str, str)  # returncode, stdout, stderr
+    progress = Signal(str)  # progress message
+    
+    def __init__(self, script_dir):
+        super().__init__()
+        self.script_dir = script_dir
+        
+    def run(self):
+        import os
+        import subprocess
+        original_cwd = os.getcwd()
+        os.chdir(self.script_dir)
+        
+        # Set environment variable to avoid OpenMP conflicts
+        env = os.environ.copy()
+        env['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+        
+        try:
+            self.progress.emit("Starting SAM2 video tracking...")
+            
+            # Run the backend script
+            result = subprocess.run(["python", "scripts/demo2.py"], 
+                                  capture_output=True, text=True, check=False, env=env)
+            
+            self.finished.emit(result.returncode, result.stdout, result.stderr)
+            
+        except Exception as e:
+            self.finished.emit(-1, "", str(e))
+        finally:
+            os.chdir(original_cwd)
 
 class BoundingBoxView(QGraphicsView):
     def __init__(self, scene, parent=None):
@@ -80,6 +115,7 @@ class MainWindow(QMainWindow):
         self.frame_count = 0
         self.current_frame = 0
         self.playing = False
+        self.worker = None  # Processing worker thread
 
         self.splitter = QSplitter(Qt.Horizontal, self)
 
@@ -109,7 +145,6 @@ class MainWindow(QMainWindow):
         self.finish_btn = QPushButton("Finish")
         self.finish_btn.setEnabled(False)
         self.finish_btn.clicked.connect(self.finish_annotation)
-        self.finish_btn.clicked.connect(self.finish_function)
         controls.addWidget(self.finish_btn)
 
         controls.addStretch()
@@ -278,6 +313,7 @@ class MainWindow(QMainWindow):
 
     def finish_annotation(self):
         self.save_annotation()
+        
         # Save to boxes.csv in the current directory for the backend to process
         save_path = "boxes.csv"
         with open(save_path, 'w', newline='') as f:
@@ -285,21 +321,98 @@ class MainWindow(QMainWindow):
             writer.writerow(['video_path','frame','x','y','width','height'])
             for p, data in self.annotations.items():
                 writer.writerow([p, *data])
+        
+        # Also save a backup with timestamp to preserve data
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = f"boxes_backup_{timestamp}.csv"
+        with open(backup_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['video_path','frame','x','y','width','height'])
+            for p, data in self.annotations.items():
+                writer.writerow([p, *data])
+        
+        print(f"Bounding box data saved to {save_path}")
+        print(f"Backup saved to {backup_path}")
+        
         self.load_csv_to_table(save_path)
         self.table.show()
         self.splitter.setSizes([600,400])
-        self.finish_btn.setEnabled(False)
+        
+        # Now start the backend processing
+        self.finish_function()
     
     def finish_function(self):
-        # Change to the parent directory to run the backend script
-        import os
-        original_cwd = os.getcwd()
+        # Check if already processing
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.warning(self, "Processing", "Processing is already in progress!")
+            return
+        
+        # Disable UI controls during processing
+        self.load_btn.setEnabled(False)
+        self.next_btn.setEnabled(False)
+        self.process_btn.setEnabled(False)
+        self.play_btn.setEnabled(False)
+        self.finish_btn.setEnabled(False)
+        
+        # Show progress dialog
+        self.progress_dialog = QMessageBox(self)
+        self.progress_dialog.setWindowTitle("Processing Videos")
+        self.progress_dialog.setText("Starting SAM2 video tracking...\n\nThis may take a few minutes depending on video length.\nPlease wait...")
+        self.progress_dialog.setStandardButtons(QMessageBox.NoButton)
+        self.progress_dialog.show()
+        
+        # Start worker thread
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        os.chdir(script_dir)
-        try:
-            subprocess.run(["python", "scripts/demo2.py"], check=True)
-        finally:
-            os.chdir(original_cwd)
+        self.worker = ProcessingWorker(script_dir)
+        self.worker.progress.connect(self.update_progress)
+        self.worker.finished.connect(self.processing_finished)
+        self.worker.start()
+    
+    def update_progress(self, message):
+        """Update progress dialog with current status"""
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.setText(message)
+    
+    def processing_finished(self, returncode, stdout, stderr):
+        """Handle completion of background processing"""
+        # Close progress dialog
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.close()
+            self.progress_dialog = None
+        
+        # Re-enable UI controls
+        self.load_btn.setEnabled(True)
+        self.next_btn.setEnabled(True)
+        self.process_btn.setEnabled(True)
+        self.play_btn.setEnabled(True)
+        self.finish_btn.setEnabled(True)
+        
+        # Show result message
+        if returncode == 0:
+            # Success
+            success_msg = QMessageBox(self)
+            success_msg.setWindowTitle("Success")
+            success_msg.setText("Video tracking completed successfully!\n\n"
+                               "Check the 'outputs' folder for tracked videos\n"
+                               "and 'tracking_results.csv' for detailed results.\n\n"
+                               "Application will now exit.")
+            success_msg.setIcon(QMessageBox.Information)
+            success_msg.exec()
+            
+            # Exit the application after successful processing
+            # Use QTimer to delay the quit call slightly
+            QTimer.singleShot(100, QApplication.quit)
+        else:
+            # Error occurred
+            error_msg = QMessageBox(self)
+            error_msg.setWindowTitle("Error")
+            error_msg.setText(f"An error occurred during tracking:\n\n{stderr}")
+            error_msg.setIcon(QMessageBox.Critical)
+            error_msg.exec()
+        
+        # Clean up worker
+        self.worker = None
 
     def load_csv_to_table(self, path):
         with open(path, 'r', newline='') as f:
