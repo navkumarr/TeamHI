@@ -1,6 +1,7 @@
 import argparse
 import csv
 import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import os.path as osp
 import numpy as np
 import torch
@@ -138,6 +139,7 @@ def process_tracking(predictor, video_path, start_frame, initial_bbox, writer):
 
 # Main entrypoint
 def main(args):
+    
     # Determine SAM2 config and build predictor once
     model_cfg = determine_model_cfg(args.model_path)
     predictor = build_sam2_video_predictor(model_cfg, args.model_path, device=args.device)
